@@ -6,7 +6,7 @@
             name="viewport"
             content="width=device-width, initial-scale=1, viewport-fit=cover"
         />
-        <title>One Pixel, One Color</title>
+        <title>One Pixel, One Colour</title>
         <style>
             :root {
                 color-scheme: dark;
@@ -26,16 +26,20 @@
                 inset: 0;
                 display: block;
                 image-rendering: pixelated;
+                touch-action: manipulation; /* no double-tap zoom delay */
             }
 
             #panel {
                 position: fixed;
                 left: 50%;
-                bottom: 24px;
+                bottom: max(24px, env(safe-area-inset-bottom));
                 transform: translateX(-50%);
                 display: flex;
+                flex-wrap: wrap;
+                justify-content: center;
                 gap: 10px;
                 align-items: center;
+                max-width: calc(100vw - 24px);
                 padding: 12px 14px;
                 border-radius: 14px;
                 background: rgba(20, 20, 24, 0.72);
@@ -93,6 +97,7 @@
                 opacity: 0;
                 transition: opacity 0.1s;
                 white-space: nowrap;
+                max-width: 90vw;
             }
 
             #toast {
@@ -123,6 +128,31 @@
                 opacity: 1;
                 transform: translateX(-50%) translateY(0);
             }
+
+            /* Tiny subtle glow marking where your pixel just landed. */
+            .pulse {
+                position: fixed;
+                z-index: 9;
+                pointer-events: none;
+                width: 10px;
+                height: 10px;
+                border-radius: 2px;
+                transform: translate(-50%, -50%);
+                animation: pixelPulse 600ms ease-out forwards;
+            }
+            @keyframes pixelPulse {
+                0% {
+                    transform: translate(-50%, -50%) scale(0.6);
+                    opacity: 0;
+                }
+                35% {
+                    opacity: 0.9;
+                }
+                100% {
+                    transform: translate(-50%, -50%) scale(1.7);
+                    opacity: 0;
+                }
+            }
         </style>
     </head>
     <body>
@@ -134,9 +164,9 @@
                 type="color"
                 id="color"
                 value="#ff3366"
-                aria-label="Your favorite color"
+                aria-label="Your favourite colour"
             />
-            <button type="submit" id="go">Pick my favorite color</button>
+            <button type="submit" id="go">Pick your favourite colour</button>
             <span id="count">0 pixels</span>
         </form>
 
@@ -242,6 +272,22 @@
                 "Stamped onto the canvas forever 📌",
                 "⭐⭐⭐",
             ];
+            // A small, subtle flash on the cell that was just claimed — helps you
+            // spot where your (server-assigned) pixel landed.
+            function pulseAt(idx, r, g, b) {
+                const cx = idx % GW,
+                    cy = Math.floor(idx / GW);
+                const el = document.createElement("div");
+                el.className = "pulse";
+                el.style.left = (cx + 0.5) * (window.innerWidth / GW) + "px";
+                el.style.top = (cy + 0.5) * (window.innerHeight / GH) + "px";
+                const col = `rgb(${r}, ${g}, ${b})`;
+                el.style.background = col;
+                el.style.boxShadow = `0 0 8px 2px ${col}`;
+                el.addEventListener("animationend", () => el.remove());
+                document.body.appendChild(el);
+            }
+
             const toast = document.getElementById("toast");
             let toastTimer = 0;
             function showToast() {
@@ -321,6 +367,7 @@
                         metaCache.set(data.idx, { cc: data.cc, ts: data.ts });
                         render();
                         updateCount();
+                        pulseAt(data.idx, data.r, data.g, data.b);
                         showToast();
                     }
                 } finally {
@@ -353,13 +400,20 @@
                 return cy * GW + cx;
             }
             let hoverIdx = -1;
-            stage.addEventListener("mousemove", async (e) => {
-                const idx = cellAt(e.clientX, e.clientY);
-                tip.style.left = e.clientX + "px";
-                tip.style.top = e.clientY + "px";
+            let tipTimer = 0;
+            function hideTip() {
+                tip.style.opacity = "0";
+                hoverIdx = -1;
+            }
+            // Shared by hover (mouse) and tap (touch). autoHide dismisses the tip
+            // after a moment, which is what we want on touch where there's no
+            // mouseleave to clear it.
+            async function showTipAt(clientX, clientY, autoHide) {
+                const idx = cellAt(clientX, clientY);
+                tip.style.left = clientX + "px";
+                tip.style.top = clientY + "px";
                 if (!claimed.has(idx)) {
-                    tip.style.opacity = "0";
-                    hoverIdx = -1;
+                    hideTip();
                     return;
                 }
                 if (idx !== hoverIdx) {
@@ -392,11 +446,24 @@
                     (meta.cc || "somewhere") +
                     (when ? " · " + when : "");
                 tip.style.opacity = "1";
-            });
-            stage.addEventListener("mouseleave", () => {
-                tip.style.opacity = "0";
-                hoverIdx = -1;
-            });
+                clearTimeout(tipTimer);
+                if (autoHide) tipTimer = setTimeout(hideTip, 2500);
+            }
+
+            stage.addEventListener("mousemove", (e) =>
+                showTipAt(e.clientX, e.clientY, false),
+            );
+            stage.addEventListener("mouseleave", hideTip);
+
+            // Touch: tap a claimed pixel to reveal who placed it and when.
+            stage.addEventListener(
+                "touchstart",
+                (e) => {
+                    const t = e.touches[0];
+                    if (t) showTipAt(t.clientX, t.clientY, true);
+                },
+                { passive: true },
+            );
 
             // ---- go ---------------------------------------------------------------
             resize();
