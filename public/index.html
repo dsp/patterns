@@ -37,11 +37,24 @@
         background: rgba(0, 0, 0, 0.8); color: #fff; transform: translate(-50%, -130%);
         opacity: 0; transition: opacity 0.1s; white-space: nowrap;
       }
+
+      #toast {
+        position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%) translateY(8px);
+        pointer-events: none; z-index: 11;
+        padding: 8px 14px; border-radius: 10px;
+        background: rgba(20, 20, 24, 0.9); backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        font: 13px/1.2 -apple-system, system-ui, sans-serif; color: #eee;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+        opacity: 0; transition: opacity 0.2s, transform 0.2s; white-space: nowrap;
+      }
+      #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
     </style>
   </head>
   <body>
     <canvas id="stage"></canvas>
     <div id="tip"></div>
+    <div id="toast"></div>
     <form id="panel">
       <input type="color" id="color" value="#ff3366" aria-label="Your favorite color" />
       <button type="submit" id="go">Pick my favorite color</button>
@@ -119,6 +132,16 @@
           n.toLocaleString() + (n === 1 ? " pixel" : " pixels");
       }
 
+      // ---- toast: brief confirmation after placing a pixel ------------------
+      const toast = document.getElementById("toast");
+      let toastTimer = 0;
+      function showToast(msg) {
+        toast.textContent = msg;
+        toast.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toast.classList.remove("show"), 2500);
+      }
+
       // ---- networking -------------------------------------------------------
       let ver = 0;
 
@@ -167,6 +190,7 @@
             metaCache.set(data.idx, { cc: data.cc, ts: data.ts });
             render();
             updateCount();
+            showToast("Thank you — may your pixel live forever ✨");
           }
         } finally {
           go.disabled = false;
