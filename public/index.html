@@ -27,9 +27,11 @@
                 display: block;
                 image-rendering: pixelated;
                 touch-action: none; /* we handle drag-to-pan ourselves */
+            }
+            #stage.pannable {
                 cursor: grab;
             }
-            #stage.dragging {
+            #stage.pannable.dragging {
                 cursor: grabbing;
             }
 
@@ -229,7 +231,12 @@
             // fits the viewport at that size it's centered (no panning); otherwise
             // (e.g. on phones) it zooms and you drag to pan around. panX/panY are the
             // canvas top-left offset in device pixels.
-            const MIN_CELL = 6; // smallest comfortable cell size, CSS px
+            const MIN_CELL = 6; // smallest comfortable cell size, CSS px (touch only)
+            // Touch devices (phones/tablets) zoom + pan so pixels aren't tiny; on a
+            // pointer device (desktop) we always fit the whole canvas instead.
+            const COARSE = !!(
+                window.matchMedia && window.matchMedia("(pointer: coarse)").matches
+            );
             const stage = document.getElementById("stage");
             const sctx = stage.getContext("2d");
             let panX = 0,
@@ -237,11 +244,12 @@
                 panInit = false;
 
             // Integer device px per cell (crisp, square). Use the size that fits the
-            // whole canvas, but never smaller than MIN_CELL.
+            // whole canvas; on touch, never smaller than MIN_CELL (so it zooms/pans).
             function cellSize() {
                 const dpr = window.devicePixelRatio || 1;
                 const fit = Math.floor(Math.min(stage.width / GW, stage.height / GH));
-                return Math.max(1, fit, Math.round(MIN_CELL * dpr));
+                const minCell = COARSE ? Math.round(MIN_CELL * dpr) : 1;
+                return Math.max(1, fit, minCell);
             }
 
             // Keep the canvas on-screen: center it in any dimension where it fits,
@@ -274,6 +282,10 @@
                 bctx.putImageData(img, 0, 0);
                 clampPan();
                 const s = cellSize();
+                stage.classList.toggle(
+                    "pannable",
+                    GW * s > stage.width || GH * s > stage.height,
+                );
                 sctx.imageSmoothingEnabled = false;
                 sctx.clearRect(0, 0, stage.width, stage.height);
                 sctx.drawImage(backing, 0, 0, GW, GH, panX, panY, GW * s, GH * s);
