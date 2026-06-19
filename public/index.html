@@ -235,8 +235,9 @@
         }
         const meta = metaCache.get(idx) || {};
         const when = meta.ts
-          ? new Date(meta.ts).toLocaleDateString(undefined, {
+          ? new Date(meta.ts).toLocaleString(undefined, {
               year: "numeric", month: "short", day: "numeric",
+              hour: "2-digit", minute: "2-digit", second: "2-digit",
             })
           : "";
         tip.textContent =
