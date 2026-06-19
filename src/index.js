@@ -108,6 +108,10 @@ export class Canvas {
     // counter is exactly MAX(ver) (0 when empty). No separate meta row needed.
     const row = [...this.sql.exec(`SELECT COALESCE(MAX(ver), 0) AS v FROM cells`)];
     this.ver = row[0].v;
+    // In-memory set of claimed cell indices so a pick can land on an UNclaimed
+    // cell first, only overwriting once the whole canvas is full.
+    this.claimed = new Set();
+    for (const c of this.sql.exec(`SELECT idx FROM cells`)) this.claimed.add(c.idx);
     // In-memory sliding window of recent pick times per IP (best-effort; resets
     // if the DO is evicted, which is fine for rate limiting).
     this.hits = new Map();
@@ -210,9 +214,13 @@ export class Canvas {
     return json(row.length ? { cc: row[0].cc, ts: row[0].ts } : { cc: null, ts: null });
   }
 
-  // Claim a random cell with the chosen color + caller's country.
+  // Claim a cell with the chosen color + caller's country. Prefer an unclaimed
+  // cell (probe forward from a random start); only overwrite once full.
   pick(rgb, cc) {
-    const idx = Math.floor(Math.random() * CELLS);
+    let idx = Math.floor(Math.random() * CELLS);
+    if (this.claimed.size < CELLS) {
+      while (this.claimed.has(idx)) idx = (idx + 1) % CELLS;
+    }
     this.ver += 1;
     const ts = Date.now();
     const [r, g, b] = rgb;
@@ -223,6 +231,7 @@ export class Canvas {
          cc = excluded.cc, ver = excluded.ver, ts = excluded.ts`,
       idx, r, g, b, cc, this.ver, ts,
     );
+    this.claimed.add(idx);
     return json({ idx, r, g, b, cc, ts, ver: this.ver });
   }
 }
