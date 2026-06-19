@@ -14,6 +14,19 @@ const REC = 7; //    per cell: [idx: uint32][r,g,b: uint8]
 const RATE_MAX = 8;
 const RATE_WINDOW = 10_000;
 
+// Global write ceiling (independent of IP): bounds total pick throughput so a
+// many-IP flood can't overwhelm the single DO thread or inflate cost/DB growth.
+const GLOBAL_MAX = 100; // picks ...
+const GLOBAL_WINDOW = 1_000; // ... per second
+
+// Floor the client's poll version to this many picks so many clients collapse
+// onto a single cached delta. Flooring DOWN is safe: the DO returns a superset
+// of the cells the client still needs, and re-applying seen cells is idempotent.
+const VERSION_BUCKET = 32;
+
+// Hard cap on /api/pick body size; a pick is ~22 bytes ({"color":"#rrggbb"}).
+const MAX_PICK_BODY = 256;
+
 // ---------------------------------------------------------------------------
 // Worker: serves the API. Static assets (index.html) are served automatically
 // by the assets binding for any path we don't handle here.
@@ -27,13 +40,19 @@ export default {
     }
 
     const stub = env.CANVAS.get(env.CANVAS.idFromName("global-v3"));
-    const forward = () => {
+    const forward = (overrideV) => {
       // Forward to the DO, tagging picks with the caller's country + IP (from CF).
       const headers = new Headers(request.headers);
       headers.set("x-cc", (request.cf && request.cf.country) || "XX");
       headers.set("x-ip", request.headers.get("cf-connecting-ip") || "anon");
+      let target = url.toString();
+      if (overrideV !== undefined) {
+        const u = new URL(target);
+        u.searchParams.set("v", String(overrideV));
+        target = u.toString();
+      }
       return stub.fetch(
-        new Request(url.toString(), {
+        new Request(target, {
           method: request.method,
           headers,
           body:
@@ -44,14 +63,18 @@ export default {
       );
     };
 
-    // Edge-cache deltas keyed by ?v= so all clients at the same version share a
-    // single DO computation (~1 origin hit per version instead of one per poll).
+    // Edge-cache deltas so all clients near the same version share a single DO
+    // computation. The cache key is the version floored to VERSION_BUCKET, so
+    // many clients converge on one entry and the key space stays bounded.
     if (url.pathname === "/api/delta" && request.method === "GET") {
+      const reqV = Math.max(0, Math.floor(Number(url.searchParams.get("v")) || 0));
+      const bucketV = reqV - (reqV % VERSION_BUCKET);
       const cache = caches.default;
-      const key = new Request(url.toString());
+      const key = new Request(`${url.origin}/api/delta?v=${bucketV}`);
       const hit = await cache.match(key);
       if (hit) return hit;
-      const res = await forward();
+      const res = await forward(bucketV);
+      if (!res.ok) return res; // never cache an error response
       const out = new Response(res.body, res);
       out.headers.set("cache-control", "public, max-age=2");
       ctx.waitUntil(cache.put(key, out.clone()));
@@ -88,11 +111,29 @@ export class Canvas {
     // In-memory sliding window of recent pick times per IP (best-effort; resets
     // if the DO is evicted, which is fine for rate limiting).
     this.hits = new Map();
+    this.sweep = 0; // counter to periodically evict idle IPs from `hits`
+    this.globalHits = []; // timestamps for the global write ceiling
+  }
+
+  // Global write ceiling, independent of IP: caps total picks per window.
+  allowGlobal() {
+    const now = Date.now();
+    this.globalHits = this.globalHits.filter((t) => now - t < GLOBAL_WINDOW);
+    if (this.globalHits.length >= GLOBAL_MAX) return false;
+    this.globalHits.push(now);
+    return true;
   }
 
   // Returns true if `ip` is within its pick budget, recording the attempt.
   allowPick(ip) {
     const now = Date.now();
+    // Periodically evict IPs with no recent picks so `hits` can't grow
+    // unbounded over the DO's lifetime.
+    if ((this.sweep = (this.sweep + 1) & 255) === 0) {
+      for (const [k, times] of this.hits) {
+        if (!times.some((t) => now - t < RATE_WINDOW)) this.hits.delete(k);
+      }
+    }
     const recent = (this.hits.get(ip) || []).filter((t) => now - t < RATE_WINDOW);
     if (recent.length >= RATE_MAX) {
       this.hits.set(ip, recent);
@@ -114,10 +155,20 @@ export class Canvas {
         return this.cell(Number(url.searchParams.get("i")));
       }
       if (url.pathname === "/api/pick" && request.method === "POST") {
+        if (Number(request.headers.get("content-length") || 0) > MAX_PICK_BODY) {
+          return new Response("Body too large.", { status: 413 });
+        }
+        const body = await request.json();
+        const rgb = parseColor(body && body.color);
+        // Validate before charging the rate limit so a bad color doesn't burn budget.
+        if (!rgb) return json({ error: "bad color" }, 400);
+        if (!this.allowGlobal()) {
+          return new Response("Canvas is busy — try again shortly.", { status: 429 });
+        }
         if (!this.allowPick(request.headers.get("x-ip") || "anon")) {
           return new Response("Slow down — too many picks.", { status: 429 });
         }
-        return this.pick(await request.json(), request.headers.get("x-cc") || "XX");
+        return this.pick(rgb, request.headers.get("x-cc") || "XX");
       }
     } catch (err) {
       console.error(err);
@@ -127,6 +178,8 @@ export class Canvas {
   }
 
   // Binary stream of every cell changed since version `v`.
+  // Wire format is big-endian (DataView default) on both ends; see decoder
+  // in public/index.html.
   delta(v) {
     const rows = [
       ...this.sql.exec(`SELECT idx, r, g, b FROM cells WHERE ver > ?`, v),
@@ -158,9 +211,7 @@ export class Canvas {
   }
 
   // Claim a random cell with the chosen color + caller's country.
-  pick(body, cc) {
-    const rgb = parseColor(body && body.color);
-    if (!rgb) return json({ error: "bad color" }, 400);
+  pick(rgb, cc) {
     const idx = Math.floor(Math.random() * CELLS);
     this.ver += 1;
     const ts = Date.now();
