@@ -171,6 +171,19 @@
 
       const form = document.getElementById("panel");
       const go = document.getElementById("go");
+      const colorInput = document.getElementById("color");
+
+      // Restore the color the visitor last chose (if any).
+      try {
+        const saved = localStorage.getItem("favColor");
+        if (saved) colorInput.value = saved;
+      } catch (_) {}
+      colorInput.addEventListener("change", () => {
+        try {
+          localStorage.setItem("favColor", colorInput.value);
+        } catch (_) {}
+      });
+
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         go.disabled = true;
