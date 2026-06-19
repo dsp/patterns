@@ -220,24 +220,41 @@
                 metaCache.delete(idx); // owner may have changed; re-fetch on next hover
             }
 
-            // ---- display: stretch the whole artwork to fill the viewport ----------
+            // ---- display: square pixels, the artwork tiled to fill the viewport ---
             const stage = document.getElementById("stage");
             const sctx = stage.getContext("2d");
 
+            // One layout for render + hit-testing + the pulse. The cell size is an
+            // integer number of device pixels (so cells stay crisp and square with
+            // no seams), chosen so a whole artwork fits the binding dimension; the
+            // artwork then repeats to fill the other dimension. All values are in
+            // device pixels.
+            function layout() {
+                const s = Math.max(
+                    1,
+                    Math.floor(Math.min(stage.width / GW, stage.height / GH)),
+                );
+                const tileW = GW * s,
+                    tileH = GH * s;
+                // Centered phase so the repeats are symmetric.
+                const offX = Math.round((stage.width - tileW) / 2);
+                const offY = Math.round((stage.height - tileH) / 2);
+                return { s, tileW, tileH, offX, offY };
+            }
+
             function render() {
                 bctx.putImageData(img, 0, 0);
+                const { tileW, tileH, offX, offY } = layout();
                 sctx.imageSmoothingEnabled = false;
-                sctx.drawImage(
-                    backing,
-                    0,
-                    0,
-                    GW,
-                    GH,
-                    0,
-                    0,
-                    stage.width,
-                    stage.height,
-                );
+                sctx.clearRect(0, 0, stage.width, stage.height);
+                // Start at the first tile origin at or left/above the viewport edge.
+                const startX = offX - Math.ceil(offX / tileW) * tileW;
+                const startY = offY - Math.ceil(offY / tileH) * tileH;
+                for (let y = startY; y < stage.height; y += tileH) {
+                    for (let x = startX; x < stage.width; x += tileW) {
+                        sctx.drawImage(backing, 0, 0, GW, GH, x, y, tileW, tileH);
+                    }
+                }
             }
 
             function resize() {
@@ -280,12 +297,20 @@
             // A small, subtle flash on the cell that was just claimed — helps you
             // spot where your (server-assigned) pixel landed.
             function pulseAt(idx, r, g, b) {
+                const dpr = window.devicePixelRatio || 1;
+                const { s, tileW, tileH, offX, offY } = layout();
                 const cx = idx % GW,
                     cy = Math.floor(idx / GW);
+                // Cell center (device px), shifted to the tiled copy nearest the
+                // viewport center so the flash is on-screen.
+                let x = offX + (cx + 0.5) * s;
+                let y = offY + (cy + 0.5) * s;
+                x += Math.round((stage.width / 2 - x) / tileW) * tileW;
+                y += Math.round((stage.height / 2 - y) / tileH) * tileH;
                 const el = document.createElement("div");
                 el.className = "pulse";
-                el.style.left = (cx + 0.5) * (window.innerWidth / GW) + "px";
-                el.style.top = (cy + 0.5) * (window.innerHeight / GH) + "px";
+                el.style.left = x / dpr + "px";
+                el.style.top = y / dpr + "px";
                 const col = `rgb(${r}, ${g}, ${b})`;
                 el.style.background = col;
                 el.style.boxShadow = `0 0 8px 2px ${col}`;
@@ -402,16 +427,10 @@
             }
             function cellAt(clientX, clientY) {
                 const dpr = window.devicePixelRatio || 1;
-                const px = clientX * dpr,
-                    py = clientY * dpr;
-                const cx = Math.min(
-                    GW - 1,
-                    Math.floor(px / (stage.width / GW)),
-                );
-                const cy = Math.min(
-                    GH - 1,
-                    Math.floor(py / (stage.height / GH)),
-                );
+                const { s, offX, offY } = layout();
+                // Modulo into the tile (the artwork repeats), guarding negatives.
+                const cx = ((Math.floor((clientX * dpr - offX) / s) % GW) + GW) % GW;
+                const cy = ((Math.floor((clientY * dpr - offY) / s) % GH) + GH) % GH;
                 return cy * GW + cx;
             }
             let hoverIdx = -1;
