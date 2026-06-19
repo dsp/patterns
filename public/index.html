@@ -270,6 +270,14 @@
                 panY = Math.round(panY);
             }
 
+            // Centered top-left of one tile (device px) for the desktop tile mode.
+            function tileOffset(s) {
+                return {
+                    offX: Math.round((stage.width - GW * s) / 2),
+                    offY: Math.round((stage.height - GH * s) / 2),
+                };
+            }
+
             // Center the view on a given cell (used after you place a pixel).
             function centerOn(idx) {
                 const s = cellSize();
@@ -280,15 +288,30 @@
 
             function render() {
                 bctx.putImageData(img, 0, 0);
-                clampPan();
                 const s = cellSize();
-                stage.classList.toggle(
-                    "pannable",
-                    GW * s > stage.width || GH * s > stage.height,
-                );
                 sctx.imageSmoothingEnabled = false;
                 sctx.clearRect(0, 0, stage.width, stage.height);
-                sctx.drawImage(backing, 0, 0, GW, GH, panX, panY, GW * s, GH * s);
+                if (COARSE) {
+                    // Touch: a single zoomed canvas you drag to pan around.
+                    clampPan();
+                    stage.classList.toggle(
+                        "pannable",
+                        GW * s > stage.width || GH * s > stage.height,
+                    );
+                    sctx.drawImage(backing, 0, 0, GW, GH, panX, panY, GW * s, GH * s);
+                    return;
+                }
+                // Desktop: whole canvas, repeated to fill the viewport (centered).
+                const tileW = GW * s,
+                    tileH = GH * s;
+                const { offX, offY } = tileOffset(s);
+                const startX = offX - Math.ceil(offX / tileW) * tileW;
+                const startY = offY - Math.ceil(offY / tileH) * tileH;
+                for (let y = startY; y < stage.height; y += tileH) {
+                    for (let x = startX; x < stage.width; x += tileW) {
+                        sctx.drawImage(backing, 0, 0, GW, GH, x, y, tileW, tileH);
+                    }
+                }
             }
 
             function resize() {
@@ -337,8 +360,22 @@
             function pulseAt(idx, r, g, b) {
                 const dpr = window.devicePixelRatio || 1;
                 const s = cellSize();
-                const x = panX + ((idx % GW) + 0.5) * s;
-                const y = panY + (Math.floor(idx / GW) + 0.5) * s;
+                const cx = idx % GW,
+                    cy = Math.floor(idx / GW);
+                let x, y;
+                if (COARSE) {
+                    x = panX + (cx + 0.5) * s;
+                    y = panY + (cy + 0.5) * s;
+                } else {
+                    // Tiled: flash the repeated copy nearest the viewport center.
+                    const tileW = GW * s,
+                        tileH = GH * s;
+                    const { offX, offY } = tileOffset(s);
+                    x = offX + (cx + 0.5) * s;
+                    y = offY + (cy + 0.5) * s;
+                    x += Math.round((stage.width / 2 - x) / tileW) * tileW;
+                    y += Math.round((stage.height / 2 - y) / tileH) * tileH;
+                }
                 const el = document.createElement("div");
                 el.className = "pulse";
                 el.style.left = x / dpr + "px";
@@ -437,7 +474,7 @@
                         // poll must still deliver any cells others claimed before this pick.
                         setCell(data.idx, data.r, data.g, data.b);
                         metaCache.set(data.idx, { cc: data.cc, ts: data.ts });
-                        centerOn(data.idx); // bring your pixel into view
+                        if (COARSE) centerOn(data.idx); // bring your pixel into view
                         render();
                         updateCount();
                         pulseAt(data.idx, data.r, data.g, data.b);
@@ -461,9 +498,16 @@
             function cellAt(clientX, clientY) {
                 const dpr = window.devicePixelRatio || 1;
                 const s = cellSize();
-                const cx = Math.floor((clientX * dpr - panX) / s);
-                const cy = Math.floor((clientY * dpr - panY) / s);
-                if (cx < 0 || cx >= GW || cy < 0 || cy >= GH) return -1; // outside canvas
+                if (COARSE) {
+                    const cx = Math.floor((clientX * dpr - panX) / s);
+                    const cy = Math.floor((clientY * dpr - panY) / s);
+                    if (cx < 0 || cx >= GW || cy < 0 || cy >= GH) return -1;
+                    return cy * GW + cx;
+                }
+                // Desktop is tiled; modulo into the artwork (guarding negatives).
+                const { offX, offY } = tileOffset(s);
+                const cx = ((Math.floor((clientX * dpr - offX) / s) % GW) + GW) % GW;
+                const cy = ((Math.floor((clientY * dpr - offY) / s) % GH) + GH) % GH;
                 return cy * GW + cx;
             }
             let hoverIdx = -1;
