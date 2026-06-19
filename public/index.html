@@ -26,7 +26,11 @@
                 inset: 0;
                 display: block;
                 image-rendering: pixelated;
-                touch-action: manipulation; /* no double-tap zoom delay */
+                touch-action: none; /* we handle drag-to-pan ourselves */
+                cursor: grab;
+            }
+            #stage.dragging {
+                cursor: grabbing;
             }
 
             #panel {
@@ -220,41 +224,59 @@
                 metaCache.delete(idx); // owner may have changed; re-fetch on next hover
             }
 
-            // ---- display: square pixels, the artwork tiled to fill the viewport ---
+            // ---- display: square pixels, pan to explore --------------------------
+            // Cells are square and at least MIN_CELL CSS px. When the whole canvas
+            // fits the viewport at that size it's centered (no panning); otherwise
+            // (e.g. on phones) it zooms and you drag to pan around. panX/panY are the
+            // canvas top-left offset in device pixels.
+            const MIN_CELL = 6; // smallest comfortable cell size, CSS px
             const stage = document.getElementById("stage");
             const sctx = stage.getContext("2d");
+            let panX = 0,
+                panY = 0,
+                panInit = false;
 
-            // One layout for render + hit-testing + the pulse. The cell size is an
-            // integer number of device pixels (so cells stay crisp and square with
-            // no seams), chosen so a whole artwork fits the binding dimension; the
-            // artwork then repeats to fill the other dimension. All values are in
-            // device pixels.
-            function layout() {
-                const s = Math.max(
-                    1,
-                    Math.floor(Math.min(stage.width / GW, stage.height / GH)),
-                );
-                const tileW = GW * s,
-                    tileH = GH * s;
-                // Centered phase so the repeats are symmetric.
-                const offX = Math.round((stage.width - tileW) / 2);
-                const offY = Math.round((stage.height - tileH) / 2);
-                return { s, tileW, tileH, offX, offY };
+            // Integer device px per cell (crisp, square). Use the size that fits the
+            // whole canvas, but never smaller than MIN_CELL.
+            function cellSize() {
+                const dpr = window.devicePixelRatio || 1;
+                const fit = Math.floor(Math.min(stage.width / GW, stage.height / GH));
+                return Math.max(1, fit, Math.round(MIN_CELL * dpr));
+            }
+
+            // Keep the canvas on-screen: center it in any dimension where it fits,
+            // otherwise clamp panning to its edges.
+            function clampPan() {
+                const s = cellSize();
+                const cw = GW * s,
+                    ch = GH * s;
+                panX =
+                    cw <= stage.width
+                        ? (stage.width - cw) / 2
+                        : Math.min(0, Math.max(stage.width - cw, panX));
+                panY =
+                    ch <= stage.height
+                        ? (stage.height - ch) / 2
+                        : Math.min(0, Math.max(stage.height - ch, panY));
+                panX = Math.round(panX);
+                panY = Math.round(panY);
+            }
+
+            // Center the view on a given cell (used after you place a pixel).
+            function centerOn(idx) {
+                const s = cellSize();
+                panX = stage.width / 2 - (((idx % GW) + 0.5) * s);
+                panY = stage.height / 2 - ((Math.floor(idx / GW) + 0.5) * s);
+                clampPan();
             }
 
             function render() {
                 bctx.putImageData(img, 0, 0);
-                const { tileW, tileH, offX, offY } = layout();
+                clampPan();
+                const s = cellSize();
                 sctx.imageSmoothingEnabled = false;
                 sctx.clearRect(0, 0, stage.width, stage.height);
-                // Start at the first tile origin at or left/above the viewport edge.
-                const startX = offX - Math.ceil(offX / tileW) * tileW;
-                const startY = offY - Math.ceil(offY / tileH) * tileH;
-                for (let y = startY; y < stage.height; y += tileH) {
-                    for (let x = startX; x < stage.width; x += tileW) {
-                        sctx.drawImage(backing, 0, 0, GW, GH, x, y, tileW, tileH);
-                    }
-                }
+                sctx.drawImage(backing, 0, 0, GW, GH, panX, panY, GW * s, GH * s);
             }
 
             function resize() {
@@ -263,6 +285,10 @@
                 stage.height = Math.round(window.innerHeight * dpr);
                 stage.style.width = window.innerWidth + "px";
                 stage.style.height = window.innerHeight + "px";
+                if (!panInit) {
+                    centerOn((GH >> 1) * GW + (GW >> 1)); // start centered on the canvas
+                    panInit = true;
+                }
                 render();
             }
             window.addEventListener("resize", resize);
@@ -298,15 +324,9 @@
             // spot where your (server-assigned) pixel landed.
             function pulseAt(idx, r, g, b) {
                 const dpr = window.devicePixelRatio || 1;
-                const { s, tileW, tileH, offX, offY } = layout();
-                const cx = idx % GW,
-                    cy = Math.floor(idx / GW);
-                // Cell center (device px), shifted to the tiled copy nearest the
-                // viewport center so the flash is on-screen.
-                let x = offX + (cx + 0.5) * s;
-                let y = offY + (cy + 0.5) * s;
-                x += Math.round((stage.width / 2 - x) / tileW) * tileW;
-                y += Math.round((stage.height / 2 - y) / tileH) * tileH;
+                const s = cellSize();
+                const x = panX + ((idx % GW) + 0.5) * s;
+                const y = panY + (Math.floor(idx / GW) + 0.5) * s;
                 const el = document.createElement("div");
                 el.className = "pulse";
                 el.style.left = x / dpr + "px";
@@ -405,6 +425,7 @@
                         // poll must still deliver any cells others claimed before this pick.
                         setCell(data.idx, data.r, data.g, data.b);
                         metaCache.set(data.idx, { cc: data.cc, ts: data.ts });
+                        centerOn(data.idx); // bring your pixel into view
                         render();
                         updateCount();
                         pulseAt(data.idx, data.r, data.g, data.b);
@@ -427,10 +448,10 @@
             }
             function cellAt(clientX, clientY) {
                 const dpr = window.devicePixelRatio || 1;
-                const { s, offX, offY } = layout();
-                // Modulo into the tile (the artwork repeats), guarding negatives.
-                const cx = ((Math.floor((clientX * dpr - offX) / s) % GW) + GW) % GW;
-                const cy = ((Math.floor((clientY * dpr - offY) / s) % GH) + GH) % GH;
+                const s = cellSize();
+                const cx = Math.floor((clientX * dpr - panX) / s);
+                const cy = Math.floor((clientY * dpr - panY) / s);
+                if (cx < 0 || cx >= GW || cy < 0 || cy >= GH) return -1; // outside canvas
                 return cy * GW + cx;
             }
             let hoverIdx = -1;
@@ -484,20 +505,52 @@
                 if (autoHide) tipTimer = setTimeout(hideTip, 2500);
             }
 
-            stage.addEventListener("mousemove", (e) =>
-                showTipAt(e.clientX, e.clientY, false),
-            );
+            // Drag to pan; a click/tap (no real movement) shows the cell's tooltip.
+            // Mouse movement with no button down still drives the hover tooltip.
+            const DRAG_SLOP = 6; // px before a press counts as a drag, not a tap
+            let drag = null;
+            stage.addEventListener("pointerdown", (e) => {
+                drag = {
+                    x0: e.clientX,
+                    y0: e.clientY,
+                    panX0: panX,
+                    panY0: panY,
+                    moved: false,
+                    mouse: e.pointerType === "mouse",
+                };
+                stage.setPointerCapture(e.pointerId);
+            });
+            stage.addEventListener("pointermove", (e) => {
+                if (!drag) {
+                    if (e.pointerType === "mouse")
+                        showTipAt(e.clientX, e.clientY, false); // hover
+                    return;
+                }
+                const dx = e.clientX - drag.x0,
+                    dy = e.clientY - drag.y0;
+                if (!drag.moved && Math.hypot(dx, dy) > DRAG_SLOP) {
+                    drag.moved = true;
+                    stage.classList.add("dragging");
+                    hideTip();
+                }
+                if (drag.moved) {
+                    const dpr = window.devicePixelRatio || 1;
+                    panX = drag.panX0 + dx * dpr;
+                    panY = drag.panY0 + dy * dpr;
+                    render();
+                }
+            });
+            function endDrag(e) {
+                if (drag && !drag.moved && !drag.mouse) {
+                    // A tap (touch): reveal the cell's tooltip.
+                    showTipAt(e.clientX, e.clientY, true);
+                }
+                drag = null;
+                stage.classList.remove("dragging");
+            }
+            stage.addEventListener("pointerup", endDrag);
+            stage.addEventListener("pointercancel", endDrag);
             stage.addEventListener("mouseleave", hideTip);
-
-            // Touch: tap a claimed pixel to reveal who placed it and when.
-            stage.addEventListener(
-                "touchstart",
-                (e) => {
-                    const t = e.touches[0];
-                    if (t) showTipAt(t.clientX, t.clientY, true);
-                },
-                { passive: true },
-            );
 
             // ---- go ---------------------------------------------------------------
             // Adaptive polling: 2s while the canvas is changing, backing off to
