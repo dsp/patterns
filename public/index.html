@@ -1,271 +1,407 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>One Pixel, One Color</title>
-    <style>
-      :root { color-scheme: dark; }
-      * { box-sizing: border-box; }
-      html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
-      #stage { position: fixed; inset: 0; display: block; image-rendering: pixelated; }
-
-      #panel {
-        position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
-        display: flex; gap: 10px; align-items: center;
-        padding: 12px 14px; border-radius: 14px;
-        background: rgba(20, 20, 24, 0.72); backdrop-filter: blur(10px);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        font: 14px/1.2 -apple-system, system-ui, sans-serif; color: #eee;
-        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
-      }
-      #panel input[type="color"] {
-        width: 40px; height: 40px; padding: 0; border: none; border-radius: 10px;
-        background: none; cursor: pointer;
-      }
-      #panel button {
-        border: none; border-radius: 10px; padding: 0 16px; height: 40px;
-        font: inherit; font-weight: 600; cursor: pointer;
-        background: #fff; color: #111;
-      }
-      #panel button:disabled { opacity: 0.5; cursor: default; }
-      #count { opacity: 0.7; font-variant-numeric: tabular-nums; min-width: 90px; }
-
-      #tip {
-        position: fixed; pointer-events: none; z-index: 10;
-        padding: 4px 8px; border-radius: 8px; font: 13px system-ui, sans-serif;
-        background: rgba(0, 0, 0, 0.8); color: #fff; transform: translate(-50%, -130%);
-        opacity: 0; transition: opacity 0.1s; white-space: nowrap;
-      }
-
-      #toast {
-        position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%) translateY(8px);
-        pointer-events: none; z-index: 11;
-        padding: 8px 14px; border-radius: 10px;
-        background: rgba(20, 20, 24, 0.9); backdrop-filter: blur(10px);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        font: 13px/1.2 -apple-system, system-ui, sans-serif; color: #eee;
-        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
-        opacity: 0; transition: opacity 0.2s, transform 0.2s; white-space: nowrap;
-      }
-      #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-    </style>
-  </head>
-  <body>
-    <canvas id="stage"></canvas>
-    <div id="tip"></div>
-    <div id="toast"></div>
-    <form id="panel">
-      <input type="color" id="color" value="#ff3366" aria-label="Your favorite color" />
-      <button type="submit" id="go">Pick my favorite color</button>
-      <span id="count">0 pixels</span>
-    </form>
-
-    <script>
-      // GW/GH must match the same constants in src/index.js.
-      const GW = 320; // grid width  (16:9)
-      const GH = 180; // grid height
-      const CELLS = GW * GH;
-
-      // Binary delta wire format (must match the encoder in src/index.js):
-      const HEADER = 8; // [ver: uint32][count: uint32]
-      const REC = 7; //    per cell: [idx: uint32][r,g,b: uint8]
-
-      // ---- backing image (one device pixel per cell) ------------------------
-      const backing = document.createElement("canvas");
-      backing.width = GW;
-      backing.height = GH;
-      const bctx = backing.getContext("2d");
-      const img = bctx.createImageData(GW, GH);
-
-      // Deterministic gray tone for an unclaimed cell.
-      function grayFor(i) {
-        let x = (i * 2654435761) >>> 0;
-        x ^= x >>> 15;
-        return 56 + (x % 72); // 56..127
-      }
-      for (let i = 0; i < CELLS; i++) {
-        const g = grayFor(i);
-        const o = i * 4;
-        img.data[o] = g;
-        img.data[o + 1] = g;
-        img.data[o + 2] = g;
-        img.data[o + 3] = 255;
-      }
-      bctx.putImageData(img, 0, 0);
-
-      const claimed = new Set(); // idx of cells someone has picked
-      const metaCache = new Map(); // idx -> { cc, ts } (lazy)
-
-      function setCell(idx, r, g, b) {
-        const o = idx * 4;
-        img.data[o] = r;
-        img.data[o + 1] = g;
-        img.data[o + 2] = b;
-        claimed.add(idx);
-        metaCache.delete(idx); // owner may have changed; re-fetch on next hover
-      }
-
-      // ---- display: stretch the whole artwork to fill the viewport ----------
-      const stage = document.getElementById("stage");
-      const sctx = stage.getContext("2d");
-
-      function render() {
-        bctx.putImageData(img, 0, 0);
-        sctx.imageSmoothingEnabled = false;
-        sctx.drawImage(backing, 0, 0, GW, GH, 0, 0, stage.width, stage.height);
-      }
-
-      function resize() {
-        const dpr = window.devicePixelRatio || 1;
-        stage.width = Math.round(window.innerWidth * dpr);
-        stage.height = Math.round(window.innerHeight * dpr);
-        stage.style.width = window.innerWidth + "px";
-        stage.style.height = window.innerHeight + "px";
-        render();
-      }
-      window.addEventListener("resize", resize);
-
-      function updateCount() {
-        const n = claimed.size;
-        document.getElementById("count").textContent =
-          n.toLocaleString() + (n === 1 ? " pixel" : " pixels");
-      }
-
-      // ---- toast: brief confirmation after placing a pixel ------------------
-      const toast = document.getElementById("toast");
-      let toastTimer = 0;
-      function showToast(msg) {
-        toast.textContent = msg;
-        toast.classList.add("show");
-        clearTimeout(toastTimer);
-        toastTimer = setTimeout(() => toast.classList.remove("show"), 2500);
-      }
-
-      // ---- networking -------------------------------------------------------
-      let ver = 0;
-
-      async function poll() {
-        try {
-          const res = await fetch("/api/delta?v=" + ver);
-          if (!res.ok) return; // don't parse an error page as binary
-          const buf = await res.arrayBuffer();
-          if (buf.byteLength < HEADER) return;
-          const dv = new DataView(buf);
-          ver = dv.getUint32(0);
-          const count = dv.getUint32(4);
-          let o = HEADER;
-          for (let i = 0; i < count; i++) {
-            const idx = dv.getUint32(o);
-            setCell(idx, dv.getUint8(o + 4), dv.getUint8(o + 5), dv.getUint8(o + 6));
-            o += REC;
-          }
-          if (count > 0) {
-            render();
-            updateCount();
-          }
-        } catch (e) {
-          console.warn("poll failed", e);
-        }
-      }
-
-      const form = document.getElementById("panel");
-      const go = document.getElementById("go");
-      const colorInput = document.getElementById("color");
-
-      // Restore the color the visitor last chose (if any).
-      try {
-        const saved = localStorage.getItem("favColor");
-        if (saved) colorInput.value = saved;
-      } catch (_) {}
-      colorInput.addEventListener("change", () => {
-        try {
-          localStorage.setItem("favColor", colorInput.value);
-        } catch (_) {}
-      });
-
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        go.disabled = true;
-        try {
-          const color = document.getElementById("color").value;
-          const res = await fetch("/api/pick", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ color }),
-          });
-          if (!res.ok) return; // e.g. 429 rate-limited
-          const data = await res.json();
-          if (data && typeof data.idx === "number") {
-            // Apply our own pixel immediately, but DON'T advance `ver`: the next
-            // poll must still deliver any cells others claimed before this pick.
-            setCell(data.idx, data.r, data.g, data.b);
-            metaCache.set(data.idx, { cc: data.cc, ts: data.ts });
-            render();
-            updateCount();
-            showToast("Thank you — may your pixel live forever ✨");
-          }
-        } finally {
-          go.disabled = false;
-        }
-      });
-
-      // ---- hover tooltip: show the country a cell was picked from -----------
-      const tip = document.getElementById("tip");
-      function flag(cc) {
-        if (!cc || cc.length !== 2 || cc === "XX") return "🏳️";
-        return String.fromCodePoint(
-          ...[...cc.toUpperCase()].map((c) => 127397 + c.charCodeAt(0)),
-        );
-      }
-      function cellAt(clientX, clientY) {
-        const dpr = window.devicePixelRatio || 1;
-        const px = clientX * dpr, py = clientY * dpr;
-        const cx = Math.min(GW - 1, Math.floor(px / (stage.width / GW)));
-        const cy = Math.min(GH - 1, Math.floor(py / (stage.height / GH)));
-        return cy * GW + cx;
-      }
-      let hoverIdx = -1;
-      stage.addEventListener("mousemove", async (e) => {
-        const idx = cellAt(e.clientX, e.clientY);
-        tip.style.left = e.clientX + "px";
-        tip.style.top = e.clientY + "px";
-        if (!claimed.has(idx)) {
-          tip.style.opacity = "0";
-          hoverIdx = -1;
-          return;
-        }
-        if (idx !== hoverIdx) {
-          hoverIdx = idx;
-          if (!metaCache.has(idx)) {
-            try {
-              const r = await fetch("/api/cell?i=" + idx, { cache: "no-store" });
-              metaCache.set(idx, await r.json());
-            } catch (_) {
-              metaCache.set(idx, { cc: null, ts: null });
+    <head>
+        <meta charset="utf-8" />
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1, viewport-fit=cover"
+        />
+        <title>One Pixel, One Color</title>
+        <style>
+            :root {
+                color-scheme: dark;
             }
-          }
-        }
-        const meta = metaCache.get(idx) || {};
-        const when = meta.ts
-          ? new Date(meta.ts).toLocaleString(undefined, {
-              year: "numeric", month: "short", day: "numeric",
-              hour: "2-digit", minute: "2-digit", second: "2-digit",
-            })
-          : "";
-        tip.textContent =
-          flag(meta.cc) + " " + (meta.cc || "somewhere") + (when ? " · " + when : "");
-        tip.style.opacity = "1";
-      });
-      stage.addEventListener("mouseleave", () => {
-        tip.style.opacity = "0";
-        hoverIdx = -1;
-      });
+            * {
+                box-sizing: border-box;
+            }
+            html,
+            body {
+                margin: 0;
+                height: 100%;
+                overflow: hidden;
+                background: #111;
+            }
+            #stage {
+                position: fixed;
+                inset: 0;
+                display: block;
+                image-rendering: pixelated;
+            }
 
-      // ---- go ---------------------------------------------------------------
-      resize();
-      poll();
-      setInterval(poll, 2000);
-    </script>
-  </body>
+            #panel {
+                position: fixed;
+                left: 50%;
+                bottom: 24px;
+                transform: translateX(-50%);
+                display: flex;
+                gap: 10px;
+                align-items: center;
+                padding: 12px 14px;
+                border-radius: 14px;
+                background: rgba(20, 20, 24, 0.72);
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                font:
+                    14px/1.2 -apple-system,
+                    system-ui,
+                    sans-serif;
+                color: #eee;
+                box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+            }
+            #panel input[type="color"] {
+                width: 40px;
+                height: 40px;
+                padding: 0;
+                border: none;
+                border-radius: 10px;
+                background: none;
+                cursor: pointer;
+            }
+            #panel button {
+                border: none;
+                border-radius: 10px;
+                padding: 0 16px;
+                height: 40px;
+                font: inherit;
+                font-weight: 600;
+                cursor: pointer;
+                background: #fff;
+                color: #111;
+            }
+            #panel button:disabled {
+                opacity: 0.5;
+                cursor: default;
+            }
+            #count {
+                opacity: 0.7;
+                font-variant-numeric: tabular-nums;
+                min-width: 90px;
+            }
+
+            #tip {
+                position: fixed;
+                pointer-events: none;
+                z-index: 10;
+                padding: 4px 8px;
+                border-radius: 8px;
+                font:
+                    13px system-ui,
+                    sans-serif;
+                background: rgba(0, 0, 0, 0.8);
+                color: #fff;
+                transform: translate(-50%, -130%);
+                opacity: 0;
+                transition: opacity 0.1s;
+                white-space: nowrap;
+            }
+
+            #toast {
+                position: fixed;
+                left: 50%;
+                bottom: 84px;
+                transform: translateX(-50%) translateY(8px);
+                pointer-events: none;
+                z-index: 11;
+                padding: 8px 14px;
+                border-radius: 10px;
+                background: rgba(20, 20, 24, 0.9);
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                font:
+                    13px/1.2 -apple-system,
+                    system-ui,
+                    sans-serif;
+                color: #eee;
+                box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+                opacity: 0;
+                transition:
+                    opacity 0.2s,
+                    transform 0.2s;
+                white-space: nowrap;
+            }
+            #toast.show {
+                opacity: 1;
+                transform: translateX(-50%) translateY(0);
+            }
+        </style>
+    </head>
+    <body>
+        <canvas id="stage"></canvas>
+        <div id="tip"></div>
+        <div id="toast"></div>
+        <form id="panel">
+            <input
+                type="color"
+                id="color"
+                value="#ff3366"
+                aria-label="Your favorite color"
+            />
+            <button type="submit" id="go">Pick my favorite color</button>
+            <span id="count">0 pixels</span>
+        </form>
+
+        <script>
+            // GW/GH must match the same constants in src/index.js.
+            const GW = 320; // grid width  (16:9)
+            const GH = 180; // grid height
+            const CELLS = GW * GH;
+
+            // Binary delta wire format (must match the encoder in src/index.js):
+            const HEADER = 8; // [ver: uint32][count: uint32]
+            const REC = 7; //    per cell: [idx: uint32][r,g,b: uint8]
+
+            // ---- backing image (one device pixel per cell) ------------------------
+            const backing = document.createElement("canvas");
+            backing.width = GW;
+            backing.height = GH;
+            const bctx = backing.getContext("2d");
+            const img = bctx.createImageData(GW, GH);
+
+            // Deterministic gray tone for an unclaimed cell.
+            function grayFor(i) {
+                let x = (i * 2654435761) >>> 0;
+                x ^= x >>> 15;
+                return 56 + (x % 72); // 56..127
+            }
+            for (let i = 0; i < CELLS; i++) {
+                const g = grayFor(i);
+                const o = i * 4;
+                img.data[o] = g;
+                img.data[o + 1] = g;
+                img.data[o + 2] = g;
+                img.data[o + 3] = 255;
+            }
+            bctx.putImageData(img, 0, 0);
+
+            const claimed = new Set(); // idx of cells someone has picked
+            const metaCache = new Map(); // idx -> { cc, ts } (lazy)
+
+            function setCell(idx, r, g, b) {
+                const o = idx * 4;
+                img.data[o] = r;
+                img.data[o + 1] = g;
+                img.data[o + 2] = b;
+                claimed.add(idx);
+                metaCache.delete(idx); // owner may have changed; re-fetch on next hover
+            }
+
+            // ---- display: stretch the whole artwork to fill the viewport ----------
+            const stage = document.getElementById("stage");
+            const sctx = stage.getContext("2d");
+
+            function render() {
+                bctx.putImageData(img, 0, 0);
+                sctx.imageSmoothingEnabled = false;
+                sctx.drawImage(
+                    backing,
+                    0,
+                    0,
+                    GW,
+                    GH,
+                    0,
+                    0,
+                    stage.width,
+                    stage.height,
+                );
+            }
+
+            function resize() {
+                const dpr = window.devicePixelRatio || 1;
+                stage.width = Math.round(window.innerWidth * dpr);
+                stage.height = Math.round(window.innerHeight * dpr);
+                stage.style.width = window.innerWidth + "px";
+                stage.style.height = window.innerHeight + "px";
+                render();
+            }
+            window.addEventListener("resize", resize);
+
+            function updateCount() {
+                const n = claimed.size;
+                document.getElementById("count").textContent =
+                    n.toLocaleString() + (n === 1 ? " pixel" : " pixels");
+            }
+
+            // ---- toast: brief confirmation after placing a pixel ------------------
+            const TOASTS = [
+                "Thank you. May your pixel live forever ✨",
+                "Your pixel has joined the mosaic 🧩",
+                "One pixel for you, one pixel for history 🏛️",
+                "One square at a time 🟦",
+                "The canvas thanks you 🎨",
+                "A tiny mark 🌟",
+                "It is colour, not color 🌈",
+                "Pixel placed. ⏳",
+                "dot, dot, dot 🔵",
+                "May your pixel shine bright forever 💫",
+                "Logged 🧱",
+                "Your speck of color is now eternal ♾️",
+                "A small square, a big moment 🎉",
+                "As you wish 🌱",
+                "Your pixel is in good company 🤝",
+                "Thanks for bringing color to greyness 📜",
+                "Stamped onto the canvas forever 📌",
+                "⭐⭐⭐",
+            ];
+            const toast = document.getElementById("toast");
+            let toastTimer = 0;
+            function showToast() {
+                toast.textContent =
+                    TOASTS[Math.floor(Math.random() * TOASTS.length)];
+                toast.classList.add("show");
+                clearTimeout(toastTimer);
+                toastTimer = setTimeout(
+                    () => toast.classList.remove("show"),
+                    2500,
+                );
+            }
+
+            // ---- networking -------------------------------------------------------
+            let ver = 0;
+
+            async function poll() {
+                try {
+                    const res = await fetch("/api/delta?v=" + ver);
+                    if (!res.ok) return; // don't parse an error page as binary
+                    const buf = await res.arrayBuffer();
+                    if (buf.byteLength < HEADER) return;
+                    const dv = new DataView(buf);
+                    ver = dv.getUint32(0);
+                    const count = dv.getUint32(4);
+                    let o = HEADER;
+                    for (let i = 0; i < count; i++) {
+                        const idx = dv.getUint32(o);
+                        setCell(
+                            idx,
+                            dv.getUint8(o + 4),
+                            dv.getUint8(o + 5),
+                            dv.getUint8(o + 6),
+                        );
+                        o += REC;
+                    }
+                    if (count > 0) {
+                        render();
+                        updateCount();
+                    }
+                } catch (e) {
+                    console.warn("poll failed", e);
+                }
+            }
+
+            const form = document.getElementById("panel");
+            const go = document.getElementById("go");
+            const colorInput = document.getElementById("color");
+
+            // Restore the color the visitor last chose (if any).
+            try {
+                const saved = localStorage.getItem("favColor");
+                if (saved) colorInput.value = saved;
+            } catch (_) {}
+            colorInput.addEventListener("change", () => {
+                try {
+                    localStorage.setItem("favColor", colorInput.value);
+                } catch (_) {}
+            });
+
+            form.addEventListener("submit", async (e) => {
+                e.preventDefault();
+                go.disabled = true;
+                try {
+                    const color = document.getElementById("color").value;
+                    const res = await fetch("/api/pick", {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ color }),
+                    });
+                    if (!res.ok) return; // e.g. 429 rate-limited
+                    const data = await res.json();
+                    if (data && typeof data.idx === "number") {
+                        // Apply our own pixel immediately, but DON'T advance `ver`: the next
+                        // poll must still deliver any cells others claimed before this pick.
+                        setCell(data.idx, data.r, data.g, data.b);
+                        metaCache.set(data.idx, { cc: data.cc, ts: data.ts });
+                        render();
+                        updateCount();
+                        showToast();
+                    }
+                } finally {
+                    go.disabled = false;
+                }
+            });
+
+            // ---- hover tooltip: show the country a cell was picked from -----------
+            const tip = document.getElementById("tip");
+            function flag(cc) {
+                if (!cc || cc.length !== 2 || cc === "XX") return "🏳️";
+                return String.fromCodePoint(
+                    ...[...cc.toUpperCase()].map(
+                        (c) => 127397 + c.charCodeAt(0),
+                    ),
+                );
+            }
+            function cellAt(clientX, clientY) {
+                const dpr = window.devicePixelRatio || 1;
+                const px = clientX * dpr,
+                    py = clientY * dpr;
+                const cx = Math.min(
+                    GW - 1,
+                    Math.floor(px / (stage.width / GW)),
+                );
+                const cy = Math.min(
+                    GH - 1,
+                    Math.floor(py / (stage.height / GH)),
+                );
+                return cy * GW + cx;
+            }
+            let hoverIdx = -1;
+            stage.addEventListener("mousemove", async (e) => {
+                const idx = cellAt(e.clientX, e.clientY);
+                tip.style.left = e.clientX + "px";
+                tip.style.top = e.clientY + "px";
+                if (!claimed.has(idx)) {
+                    tip.style.opacity = "0";
+                    hoverIdx = -1;
+                    return;
+                }
+                if (idx !== hoverIdx) {
+                    hoverIdx = idx;
+                    if (!metaCache.has(idx)) {
+                        try {
+                            const r = await fetch("/api/cell?i=" + idx, {
+                                cache: "no-store",
+                            });
+                            metaCache.set(idx, await r.json());
+                        } catch (_) {
+                            metaCache.set(idx, { cc: null, ts: null });
+                        }
+                    }
+                }
+                const meta = metaCache.get(idx) || {};
+                const when = meta.ts
+                    ? new Date(meta.ts).toLocaleString(undefined, {
+                          year: "numeric",
+                          month: "short",
+                          day: "numeric",
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          second: "2-digit",
+                      })
+                    : "";
+                tip.textContent =
+                    flag(meta.cc) +
+                    " " +
+                    (meta.cc || "somewhere") +
+                    (when ? " · " + when : "");
+                tip.style.opacity = "1";
+            });
+            stage.addEventListener("mouseleave", () => {
+                tip.style.opacity = "0";
+                hoverIdx = -1;
+            });
+
+            // ---- go ---------------------------------------------------------------
+            resize();
+            poll();
+            setInterval(poll, 2000);
+        </script>
+    </body>
 </html>
