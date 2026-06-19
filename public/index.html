@@ -49,15 +49,16 @@
     </form>
 
     <script>
-      const GRID = 180;
-      const CELLS = GRID * GRID;
+      const GW = 320; // grid width  (16:9)
+      const GH = 180; // grid height
+      const CELLS = GW * GH;
 
       // ---- backing image (one device pixel per cell) ------------------------
       const backing = document.createElement("canvas");
-      backing.width = GRID;
-      backing.height = GRID;
+      backing.width = GW;
+      backing.height = GH;
       const bctx = backing.getContext("2d");
-      const img = bctx.createImageData(GRID, GRID);
+      const img = bctx.createImageData(GW, GH);
 
       // Deterministic gray tone for an unclaimed cell.
       function grayFor(i) {
@@ -86,20 +87,14 @@
         claimed.add(idx);
       }
 
-      // ---- display: tile the square artwork across the viewport -------------
+      // ---- display: stretch the whole artwork to fill the viewport ----------
       const stage = document.getElementById("stage");
       const sctx = stage.getContext("2d");
-      let tile = 0; // displayed size (px) of one full GRID x GRID artwork
 
       function render() {
         bctx.putImageData(img, 0, 0);
         sctx.imageSmoothingEnabled = false;
-        sctx.clearRect(0, 0, stage.width, stage.height);
-        for (let y = 0; y < stage.height; y += tile) {
-          for (let x = 0; x < stage.width; x += tile) {
-            sctx.drawImage(backing, 0, 0, GRID, GRID, x, y, tile, tile);
-          }
-        }
+        sctx.drawImage(backing, 0, 0, GW, GH, 0, 0, stage.width, stage.height);
       }
 
       function resize() {
@@ -108,8 +103,6 @@
         stage.height = Math.round(window.innerHeight * dpr);
         stage.style.width = window.innerWidth + "px";
         stage.style.height = window.innerHeight + "px";
-        // One whole artwork fits the smaller dimension; repeats across the larger.
-        tile = Math.min(stage.width, stage.height);
         render();
       }
       window.addEventListener("resize", resize);
@@ -181,10 +174,9 @@
       function cellAt(clientX, clientY) {
         const dpr = window.devicePixelRatio || 1;
         const px = clientX * dpr, py = clientY * dpr;
-        const cs = tile / GRID; // displayed size of one cell
-        const cx = Math.floor((px % tile) / cs);
-        const cy = Math.floor((py % tile) / cs);
-        return cy * GRID + cx;
+        const cx = Math.floor(px / (stage.width / GW));
+        const cy = Math.floor(py / (stage.height / GH));
+        return cy * GW + cx;
       }
       let hoverIdx = -1;
       stage.addEventListener("mousemove", async (e) => {

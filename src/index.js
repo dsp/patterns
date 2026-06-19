@@ -1,8 +1,9 @@
 // Communal pixel mosaic on Cloudflare Workers + a single SQLite-backed
 // Durable Object. The DO is the source of truth for every claimed cell.
 
-const GRID = 180; // 180 x 180 cells => 8px cells on a 1440px canvas
-const CELLS = GRID * GRID; // 32,400
+const GW = 320; // grid width  (16:9 -> fills a widescreen viewport)
+const GH = 180; // grid height
+const CELLS = GW * GH; // 57,600 (8px cells on a 2560x1440 display)
 
 // ---------------------------------------------------------------------------
 // Worker: serves the API. Static assets (index.html) are served automatically
