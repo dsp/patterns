@@ -49,9 +49,14 @@
     </form>
 
     <script>
+      // GW/GH must match the same constants in src/index.js.
       const GW = 320; // grid width  (16:9)
       const GH = 180; // grid height
       const CELLS = GW * GH;
+
+      // Binary delta wire format (must match the encoder in src/index.js):
+      const HEADER = 8; // [ver: uint32][count: uint32]
+      const REC = 7; //    per cell: [idx: uint32][r,g,b: uint8]
 
       // ---- backing image (one device pixel per cell) ------------------------
       const backing = document.createElement("canvas");
@@ -85,6 +90,7 @@
         img.data[o + 1] = g;
         img.data[o + 2] = b;
         claimed.add(idx);
+        metaCache.delete(idx); // owner may have changed; re-fetch on next hover
       }
 
       // ---- display: stretch the whole artwork to fill the viewport ----------
@@ -118,23 +124,25 @@
 
       async function poll() {
         try {
-          const res = await fetch("/api/delta?v=" + ver, { cache: "no-store" });
+          const res = await fetch("/api/delta?v=" + ver);
+          if (!res.ok) return; // don't parse an error page as binary
           const buf = await res.arrayBuffer();
+          if (buf.byteLength < HEADER) return;
           const dv = new DataView(buf);
           ver = dv.getUint32(0);
           const count = dv.getUint32(4);
-          let o = 8;
+          let o = HEADER;
           for (let i = 0; i < count; i++) {
             const idx = dv.getUint32(o);
             setCell(idx, dv.getUint8(o + 4), dv.getUint8(o + 5), dv.getUint8(o + 6));
-            o += 7;
+            o += REC;
           }
           if (count > 0) {
             render();
             updateCount();
           }
         } catch (e) {
-          /* transient; try again next tick */
+          console.warn("poll failed", e);
         }
       }
 
@@ -150,11 +158,13 @@
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ color }),
           });
+          if (!res.ok) return; // e.g. 429 rate-limited
           const data = await res.json();
           if (data && typeof data.idx === "number") {
+            // Apply our own pixel immediately, but DON'T advance `ver`: the next
+            // poll must still deliver any cells others claimed before this pick.
             setCell(data.idx, data.r, data.g, data.b);
             metaCache.set(data.idx, { cc: data.cc, ts: data.ts });
-            if (data.ver > ver) ver = data.ver;
             render();
             updateCount();
           }
@@ -174,8 +184,8 @@
       function cellAt(clientX, clientY) {
         const dpr = window.devicePixelRatio || 1;
         const px = clientX * dpr, py = clientY * dpr;
-        const cx = Math.floor(px / (stage.width / GW));
-        const cy = Math.floor(py / (stage.height / GH));
+        const cx = Math.min(GW - 1, Math.floor(px / (stage.width / GW)));
+        const cy = Math.min(GH - 1, Math.floor(py / (stage.height / GH)));
         return cy * GW + cx;
       }
       let hoverIdx = -1;
