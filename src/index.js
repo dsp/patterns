@@ -17,7 +17,7 @@ export default {
       return new Response("Not found", { status: 404 });
     }
 
-    const stub = env.CANVAS.get(env.CANVAS.idFromName("global"));
+    const stub = env.CANVAS.get(env.CANVAS.idFromName("global-v2"));
 
     // Forward to the DO, tagging picks with the caller's country (from CF).
     const headers = new Headers(request.headers);
