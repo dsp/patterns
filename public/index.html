@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>One Pixel, One Color</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #111; }
+      #stage { position: fixed; inset: 0; display: block; image-rendering: pixelated; }
+
+      #panel {
+        position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+        display: flex; gap: 10px; align-items: center;
+        padding: 12px 14px; border-radius: 14px;
+        background: rgba(20, 20, 24, 0.72); backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        font: 14px/1.2 -apple-system, system-ui, sans-serif; color: #eee;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+      }
+      #panel input[type="color"] {
+        width: 40px; height: 40px; padding: 0; border: none; border-radius: 10px;
+        background: none; cursor: pointer;
+      }
+      #panel button {
+        border: none; border-radius: 10px; padding: 0 16px; height: 40px;
+        font: inherit; font-weight: 600; cursor: pointer;
+        background: #fff; color: #111;
+      }
+      #panel button:disabled { opacity: 0.5; cursor: default; }
+      #count { opacity: 0.7; font-variant-numeric: tabular-nums; min-width: 90px; }
+
+      #tip {
+        position: fixed; pointer-events: none; z-index: 10;
+        padding: 4px 8px; border-radius: 8px; font: 13px system-ui, sans-serif;
+        background: rgba(0, 0, 0, 0.8); color: #fff; transform: translate(-50%, -130%);
+        opacity: 0; transition: opacity 0.1s; white-space: nowrap;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+    <div id="tip"></div>
+    <form id="panel">
+      <input type="color" id="color" value="#ff3366" aria-label="Your favorite color" />
+      <button type="submit" id="go">Pick my favorite color</button>
+      <span id="count">0 pixels</span>
+    </form>
+
+    <script>
+      const GRID = 288;
+      const CELLS = GRID * GRID;
+
+      // ---- backing image (one device pixel per cell) ------------------------
+      const backing = document.createElement("canvas");
+      backing.width = GRID;
+      backing.height = GRID;
+      const bctx = backing.getContext("2d");
+      const img = bctx.createImageData(GRID, GRID);
+
+      // Deterministic gray tone for an unclaimed cell.
+      function grayFor(i) {
+        let x = (i * 2654435761) >>> 0;
+        x ^= x >>> 15;
+        return 56 + (x % 72); // 56..127
+      }
+      for (let i = 0; i < CELLS; i++) {
+        const g = grayFor(i);
+        const o = i * 4;
+        img.data[o] = g;
+        img.data[o + 1] = g;
+        img.data[o + 2] = g;
+        img.data[o + 3] = 255;
+      }
+      bctx.putImageData(img, 0, 0);
+
+      const claimed = new Set(); // idx of cells someone has picked
+      const metaCache = new Map(); // idx -> { cc, ts } (lazy)
+
+      function setCell(idx, r, g, b) {
+        const o = idx * 4;
+        img.data[o] = r;
+        img.data[o + 1] = g;
+        img.data[o + 2] = b;
+        claimed.add(idx);
+      }
+
+      // ---- display: tile the square artwork across the viewport -------------
+      const stage = document.getElementById("stage");
+      const sctx = stage.getContext("2d");
+      let tile = 0; // displayed size (px) of one full GRID x GRID artwork
+
+      function render() {
+        bctx.putImageData(img, 0, 0);
+        sctx.imageSmoothingEnabled = false;
+        sctx.clearRect(0, 0, stage.width, stage.height);
+        for (let y = 0; y < stage.height; y += tile) {
+          for (let x = 0; x < stage.width; x += tile) {
+            sctx.drawImage(backing, 0, 0, GRID, GRID, x, y, tile, tile);
+          }
+        }
+      }
+
+      function resize() {
+        const dpr = window.devicePixelRatio || 1;
+        stage.width = Math.round(window.innerWidth * dpr);
+        stage.height = Math.round(window.innerHeight * dpr);
+        stage.style.width = window.innerWidth + "px";
+        stage.style.height = window.innerHeight + "px";
+        // One whole artwork fits the smaller dimension; repeats across the larger.
+        tile = Math.min(stage.width, stage.height);
+        render();
+      }
+      window.addEventListener("resize", resize);
+
+      function updateCount() {
+        const n = claimed.size;
+        document.getElementById("count").textContent =
+          n.toLocaleString() + (n === 1 ? " pixel" : " pixels");
+      }
+
+      // ---- networking -------------------------------------------------------
+      let ver = 0;
+
+      async function poll() {
+        try {
+          const res = await fetch("/api/delta?v=" + ver, { cache: "no-store" });
+          const buf = await res.arrayBuffer();
+          const dv = new DataView(buf);
+          ver = dv.getUint32(0);
+          const count = dv.getUint32(4);
+          let o = 8;
+          for (let i = 0; i < count; i++) {
+            const idx = dv.getUint32(o);
+            setCell(idx, dv.getUint8(o + 4), dv.getUint8(o + 5), dv.getUint8(o + 6));
+            o += 7;
+          }
+          if (count > 0) {
+            render();
+            updateCount();
+          }
+        } catch (e) {
+          /* transient; try again next tick */
+        }
+      }
+
+      const form = document.getElementById("panel");
+      const go = document.getElementById("go");
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        go.disabled = true;
+        try {
+          const color = document.getElementById("color").value;
+          const res = await fetch("/api/pick", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ color }),
+          });
+          const data = await res.json();
+          if (data && typeof data.idx === "number") {
+            setCell(data.idx, data.r, data.g, data.b);
+            metaCache.set(data.idx, { cc: data.cc, ts: data.ts });
+            if (data.ver > ver) ver = data.ver;
+            render();
+            updateCount();
+          }
+        } finally {
+          go.disabled = false;
+        }
+      });
+
+      // ---- hover tooltip: show the country a cell was picked from -----------
+      const tip = document.getElementById("tip");
+      function flag(cc) {
+        if (!cc || cc.length !== 2 || cc === "XX") return "🏳️";
+        return String.fromCodePoint(
+          ...[...cc.toUpperCase()].map((c) => 127397 + c.charCodeAt(0)),
+        );
+      }
+      function cellAt(clientX, clientY) {
+        const dpr = window.devicePixelRatio || 1;
+        const px = clientX * dpr, py = clientY * dpr;
+        const cs = tile / GRID; // displayed size of one cell
+        const cx = Math.floor((px % tile) / cs);
+        const cy = Math.floor((py % tile) / cs);
+        return cy * GRID + cx;
+      }
+      let hoverIdx = -1;
+      stage.addEventListener("mousemove", async (e) => {
+        const idx = cellAt(e.clientX, e.clientY);
+        tip.style.left = e.clientX + "px";
+        tip.style.top = e.clientY + "px";
+        if (!claimed.has(idx)) {
+          tip.style.opacity = "0";
+          hoverIdx = -1;
+          return;
+        }
+        if (idx !== hoverIdx) {
+          hoverIdx = idx;
+          if (!metaCache.has(idx)) {
+            try {
+              const r = await fetch("/api/cell?i=" + idx, { cache: "no-store" });
+              metaCache.set(idx, await r.json());
+            } catch (_) {
+              metaCache.set(idx, { cc: null, ts: null });
+            }
+          }
+        }
+        const meta = metaCache.get(idx) || {};
+        const when = meta.ts
+          ? new Date(meta.ts).toLocaleDateString(undefined, {
+              year: "numeric", month: "short", day: "numeric",
+            })
+          : "";
+        tip.textContent =
+          flag(meta.cc) + " " + (meta.cc || "somewhere") + (when ? " · " + when : "");
+        tip.style.opacity = "1";
+      });
+      stage.addEventListener("mouseleave", () => {
+        tip.style.opacity = "0";
+        hoverIdx = -1;
+      });
+
+      // ---- go ---------------------------------------------------------------
+      resize();
+      poll();
+      setInterval(poll, 2000);
+    </script>
+  </body>
+</html>

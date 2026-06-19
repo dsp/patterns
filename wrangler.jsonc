@@ -1,0 +1,15 @@
+{
+  "name": "pixels",
+  "main": "src/index.js",
+  "compatibility_date": "2025-06-01",
+  "routes": [{ "pattern": "pattern.experimentalworks.net", "custom_domain": true }],
+  // Serve everything in ./public as static assets. The Worker below only runs
+  // for requests that don't match a static file (i.e. our /api/* routes).
+  "assets": { "directory": "./public" },
+  // One global, SQLite-backed Durable Object holds the whole canvas.
+  // SQLite-backed DOs are available on the free Workers plan.
+  "durable_objects": {
+    "bindings": [{ "name": "CANVAS", "class_name": "Canvas" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Canvas"] }]
+}
